@@ -115,16 +115,16 @@ DEF_CFG = {
 def validate_license() -> bool:
     if check_blacklist():
         return False
-    if os.getenv("PRISMA_FORCE_AUTH", "").strip().lower() in {"1", "true", "yes"}:
-        return False
+    # PRISMA_FORCE_AUTH=1/true/yes requires a valid local license.key.
+    force_auth = os.getenv("PRISMA_FORCE_AUTH", "").strip().lower() in {"1", "true", "yes"}
     lic_path = ROOT / "license.key"
-    if lic_path.exists():
-        try:
-            key = lic_path.read_text(encoding="utf-8").strip()
-            return verify_key_signature(key)
-        except Exception:
-            return False
-    return True
+    if not lic_path.exists():
+        return not force_auth
+    try:
+        key = lic_path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return False
+    return verify_key_signature(key)
 
 
 def decrypt_engine() -> bool:
@@ -206,7 +206,8 @@ class RawSniffer:
     pass
 
 
-def parse_ip_udp(_: bytes) -> Tuple[str, str, int, int]:
+def parse_ip_udp(packet_data: bytes) -> Tuple[str, str, int, int]:
+    _ = packet_data
     return "0.0.0.0", "0.0.0.0", 0, 0
 
 
@@ -250,8 +251,8 @@ class LatencyAutoTuner:
         self.rtt_ms = 0.0
         self.jitter_ms = 0.0
 
-    def on_server_change(self, _servers: List[str]):
-        pass
+    def on_server_change(self, servers: List[str]):
+        _ = servers
 
 
 class StabilizerEngine:
@@ -642,8 +643,8 @@ class MainWindow(QMainWindow):
         )
         return _make_scroll(page)
 
-    def _refresh_preview(self, hex_color):
-        color = QColor(hex_color)
+    def _refresh_preview(self, color_hex):
+        color = QColor(color_hex)
         if color.isValid():
             brightness = (color.red() * 299 + color.green() * 587 + color.blue() * 114) // 1000
             text = "#000000" if brightness > 128 else "#FFFFFF"
@@ -704,11 +705,15 @@ class MainWindow(QMainWindow):
         lay.addWidget(make_card("Server List", self._stab_server_list))
         lay.addStretch(1)
 
-        self.chk_stab_enabled.stateChanged.connect(self._toggle_stabilizer)
+        self.chk_stab_enabled.clicked.connect(self._toggle_stabilizer)
         self.btn_stab_setup.clicked.connect(self._open_stab_setup)
-        self.btn_stab_toggle.clicked.connect(self._toggle_stabilizer)
+        self.btn_stab_toggle.clicked.connect(self._on_stab_button)
         self._wire_autosave(self.chk_stab_enabled)
         return _make_scroll(page)
+
+    def _on_stab_button(self):
+        self.chk_stab_enabled.setChecked(not self.chk_stab_enabled.isChecked())
+        self._toggle_stabilizer()
 
     def _build_autosync(self) -> QScrollArea:
         page = QWidget()
@@ -906,7 +911,7 @@ class MainWindow(QMainWindow):
     def _start_stabilizer(self):
         if self._stab_running:
             return
-        ok, _msg = self._validate_stabilizer_prereqs()
+        ok, _ = self._validate_stabilizer_prereqs()
         if not ok:
             return
 
@@ -988,8 +993,11 @@ class MainWindow(QMainWindow):
             self._refresh_profiles()
 
     def _apply_loaded_config(self, cfg):
-        self.cfg = dict(DEF_CFG)
-        self.cfg.update(cfg)
+        merged = dict(self.cfg)
+        for k, v in DEF_CFG.items():
+            merged.setdefault(k, v)
+        merged.update(cfg)
+        self.cfg = merged
 
         self.edit_hex_color.setText(self.cfg["hex_color"])
         self.spin_tolerance.setValue(int(self.cfg["tolerance"]))
@@ -1018,7 +1026,11 @@ class MainWindow(QMainWindow):
         self.dspin_sensitivity.setValue(float(self.cfg["latency_sensitivity"]))
         self.dspin_jitter_dampen.setValue(float(self.cfg["jitter_dampen_px"]))
         self.spin_max_offset.setValue(int(self.cfg["sync_max_offset_px"]))
-        self.chk_stab_enabled.setChecked(bool(self.cfg["stab_enabled"]))
+        self.chk_stab_enabled.blockSignals(True)
+        try:
+            self.chk_stab_enabled.setChecked(bool(self.cfg["stab_enabled"]))
+        finally:
+            self.chk_stab_enabled.blockSignals(False)
         self.combo_controller_port.setCurrentText(str(self.cfg.get("controller_port", "1")))
 
         self._refresh_preview(self.cfg["hex_color"])
