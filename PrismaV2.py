@@ -5,6 +5,7 @@ import socket
 import sys
 import threading
 import time
+import ctypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
@@ -58,7 +59,17 @@ HAS_KB = _try_import("keyboard")
 HAS_PSUTIL = _try_import("psutil")
 HAS_PYDIVERT = _try_import("pydivert")
 
-IS_ADMIN = os.name == "nt" and os.getenv("USERNAME", "").lower() in {"administrator", "system"}
+def _is_admin() -> bool:
+    if os.name == "nt":
+        try:
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+    geteuid = getattr(os, "geteuid", None)
+    return bool(geteuid and geteuid() == 0)
+
+
+IS_ADMIN = _is_admin()
 
 
 DEF_CFG = {
@@ -102,6 +113,17 @@ DEF_CFG = {
 # ----------------------- auth / licensing stubs -----------------------
 
 def validate_license() -> bool:
+    if check_blacklist():
+        return False
+    if os.getenv("PRISMA_FORCE_AUTH", "").strip().lower() in {"1", "true", "yes"}:
+        return False
+    lic_path = ROOT / "license.key"
+    if lic_path.exists():
+        try:
+            key = lic_path.read_text(encoding="utf-8").strip()
+            return verify_key_signature(key)
+        except Exception:
+            return False
     return True
 
 
@@ -110,7 +132,7 @@ def decrypt_engine() -> bool:
 
 
 def verify_key_signature(_: str) -> bool:
-    return True
+    return bool(_ and len(_.strip()) >= 8)
 
 
 def check_blacklist() -> bool:
@@ -253,7 +275,7 @@ class StabilizerEngine:
         self._thread: Optional[threading.Thread] = None
 
     def _loop(self):
-        servers = ["198.51.100.10", "203.0.113.22"]
+        servers = [self.xbox_ip] if self.xbox_ip else []
         while self._running:
             self.stats.tick += 1
             self.stats.rtt_ms = 20.0 + (self.stats.tick % 7)
@@ -621,14 +643,14 @@ class MainWindow(QMainWindow):
         return _make_scroll(page)
 
     def _refresh_preview(self, hex_color):
-        c = QColor(hex_color)
-        if c.isValid():
-            brightness = (c.red() * 299 + c.green() * 587 + c.blue() * 114) // 1000
+        color = QColor(hex_color)
+        if color.isValid():
+            brightness = (color.red() * 299 + color.green() * 587 + color.blue() * 114) // 1000
             text = "#000000" if brightness > 128 else "#FFFFFF"
             self.color_preview.setStyleSheet(
-                f"QLabel{{background:{c.name()};color:{text};border:1px solid #2f3a46;border-radius:8px;}}"
+                f"QLabel{{background:{color.name()};color:{text};border:1px solid #2f3a46;border-radius:8px;}}"
             )
-            self.color_preview.setText(c.name().upper())
+            self.color_preview.setText(color.name().upper())
         else:
             self.color_preview.setStyleSheet(
                 "QLabel{background:#5a626d;color:#f0f3f6;border:1px solid #2f3a46;border-radius:8px;}"
@@ -671,8 +693,8 @@ class MainWindow(QMainWindow):
             self._stab_metric_tick,
             self._stab_metric_bw,
         ]
-        for i, c in enumerate(cards):
-            g.addWidget(c, i // 3, i % 3)
+        for index, card in enumerate(cards):
+            g.addWidget(card, index // 3, index % 3)
 
         self._stab_server_list = QLabel("Detected servers: --")
         self._stab_server_list.setWordWrap(True)
@@ -863,26 +885,29 @@ class MainWindow(QMainWindow):
 
     def _toggle_stabilizer(self):
         if self.chk_stab_enabled.isChecked():
-            if not IS_ADMIN:
-                QMessageBox.warning(self, "Stabilizer", "Administrator privileges are required.")
-                self.chk_stab_enabled.setChecked(False)
-                return
-            if not HAS_PYDIVERT or not HAS_PSUTIL:
-                QMessageBox.warning(self, "Stabilizer", "pydivert and psutil are required.")
-                self.chk_stab_enabled.setChecked(False)
-                return
-            if not self.cfg.get("stab_xbox_ip") or not self.cfg.get("stab_public_iface") or not self.cfg.get("stab_private_iface"):
-                QMessageBox.warning(self, "Stabilizer", "Please configure Xbox IP and interfaces first.")
+            ok, msg = self._validate_stabilizer_prereqs()
+            if not ok:
+                QMessageBox.warning(self, "Stabilizer", msg)
                 self.chk_stab_enabled.setChecked(False)
                 return
             self._start_stabilizer()
         else:
             self._stop_stabilizer()
 
+    def _validate_stabilizer_prereqs(self) -> Tuple[bool, str]:
+        if not IS_ADMIN:
+            return False, "Administrator privileges are required."
+        if not HAS_PYDIVERT or not HAS_PSUTIL:
+            return False, "pydivert and psutil are required."
+        if not self.cfg.get("stab_xbox_ip") or not self.cfg.get("stab_public_iface") or not self.cfg.get("stab_private_iface"):
+            return False, "Please configure Xbox IP and interfaces first."
+        return True, ""
+
     def _start_stabilizer(self):
         if self._stab_running:
             return
-        if not (IS_ADMIN and HAS_PYDIVERT and HAS_PSUTIL):
+        ok, _msg = self._validate_stabilizer_prereqs()
+        if not ok:
             return
 
         xbox_ip = self.cfg.get("stab_xbox_ip", "").strip()
